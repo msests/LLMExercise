@@ -2,7 +2,6 @@ import math
 import os
 import random
 import sys
-import re
 from collections import defaultdict
 import time
 from torch.utils.data import Dataset
@@ -14,26 +13,12 @@ class TokenizeBPE:
     PAD_INDEX = 1
     END_INDEX = 2
 
-    option_wrap_sentence: bool = False
-    option_preserve_tokens: bool = False
-
-    sentence_tokens: list[str] = ['.', '!', '?', '\n', '。', '！', '？']
-
-    def __init__(self,
-                 data_sets: list[Dataset],
-                 option_wrap_sentence: bool = False,
-                 option_preserve_tokens: bool = False,
-                 preserve_tokens: list[str] = None):
+    def __init__(self, data_sets: list[Dataset]):
         self.data_sets = data_sets
 
-        self.option_wrap_sentence = option_wrap_sentence
-        self.option_preserve_tokens = option_preserve_tokens
-
         self.token_list: list[str | tuple[int, int]] = []
-        self.alphabet_map: dict[str, int] = {}
-
-        # 只在分词时使用
         self.token_index_map: dict[str, int] = {}
+        self.alphabet_map: dict[str, int] = {}
 
         # 只在训练时使用
         self.indices: list[list[int]] = []
@@ -41,33 +26,18 @@ class TokenizeBPE:
         self.most_freq_pair: tuple[int, int] = (0, 0)
         self.most_freq: int = 0
         self.vocab_size: int = 0
-        self.vocab_size_limit: int = 1400
+        self.vocab_size_limit: int = 1200
         self.sample_count: int = 32000
-
-        # 内置特殊符号
         self.special_tokens: list[str] = [
-            '<s>', '<pad>', '</s>', '<unk>', '<eos>']
+            '<s>', '<pad>', '</s>', '<unk>', '.', ',', '!', '?', ';', ':']
 
-        # 添加特殊符号
         for token in self.special_tokens:
             self.alphabet_map[token] = self.vocab_size
             self.token_list.append(token)
             self.vocab_size += 1
 
-        # 添加保留符号
-        self.preserve_token_indices: list[int] = []
-        if preserve_tokens is not None:
-            for token in preserve_tokens:
-                self.alphabet_map[token] = self.vocab_size
-                self.token_list.append(token)
-                self.preserve_token_indices.append(self.vocab_size)
-                self.vocab_size += 1
-
     def IsSpecialToken(self, token: int) -> bool:
         return token < len(self.special_tokens)
-
-    def IsPreserveToken(self, index: int) -> bool:
-        return index in self.preserve_token_indices
 
     def LengthOfToken(self, token: str | tuple[int, int]) -> int:
         if isinstance(token, str):
@@ -123,11 +93,7 @@ class TokenizeBPE:
         indices = []
         token = ''
 
-        text = self.Preprocess(text)
-
-        if self.option_wrap_sentence:
-            indices.append(self.START_INDEX)
-
+        indices.append(self.START_INDEX)
         for char in text:
             if char not in self.alphabet_map:
                 if len(token) > 0:
@@ -136,14 +102,6 @@ class TokenizeBPE:
                 indices.append(self.UNKNOWN_INDEX)
                 continue
 
-            if self.option_wrap_sentence and char in self.sentence_tokens:
-                if len(token) > 0:
-                    indices.append(self.token_index_map[token])
-                    token = ''
-                indices.append(self.END_INDEX)
-                indices.append(self.alphabet_map[char])
-                indices.append(self.START_INDEX)
-
             temp_token = token + char
             if temp_token in self.token_index_map:
                 token = temp_token
@@ -151,13 +109,9 @@ class TokenizeBPE:
             else:
                 indices.append(self.token_index_map[token])
                 token = char
-
         if len(token) > 0:
             indices.append(self.token_index_map[token])
-
-        if indices[-1] == self.START_INDEX:
-            indices.pop()
-
+        indices.append(self.END_INDEX)
         return indices
 
     def Stringify(self, indices: list[int]) -> str:
@@ -202,15 +156,6 @@ class TokenizeBPE:
                     j += 1
             self.indices[i] = new_indices
 
-    def Preprocess(self, text: str) -> str:
-        # 将多个空格替换为单个空格
-        text = re.sub(r'\s+', ' ', text)
-        # 将标点符号前后的空格去除
-        text = re.sub(r'(\s?[.,!?;:\'"])\s?', r'\1', text)
-        # 去除首尾空格
-        text = text.strip()
-        return text
-
     def CollectBasicTokens(self):
         data_set = self.data_sets[0]
         sample_total = data_set.num_rows - data_set.num_rows % self.sample_count
@@ -225,28 +170,13 @@ class TokenizeBPE:
                     math.floor(random.random() * sample_range)
 
             text = data_set[sample_index]['text']
-            text = self.Preprocess(text)
             indices = []
-
-            if self.option_wrap_sentence:
-                indices.append(self.START_INDEX)
-
             for char in text:
                 if char not in self.alphabet_map:
                     self.alphabet_map[char] = self.vocab_size
                     self.token_list.append(char)
                     self.vocab_size += 1
-
-                if self.option_wrap_sentence and char in self.sentence_tokens:
-                    indices.append(self.END_INDEX)
-                    indices.append(self.alphabet_map[char])
-                    indices.append(self.START_INDEX)
-                else:
-                    indices.append(self.alphabet_map[char])
-
-            if indices[-1] == self.START_INDEX:
-                indices.pop()
-
+                indices.append(self.alphabet_map[char])
             self.indices.append(indices)
 
     def FindMaxOccurrence(self):
@@ -259,10 +189,8 @@ class TokenizeBPE:
             length = len(self.indices[i])
 
             for j in range(length - 1):
-                # 特殊字符将作为单独的token，不参与合并
-                if self.option_preserve_tokens:
-                    if self.IsPreserveToken(self.indices[i][j]) or self.IsPreserveToken(self.indices[i][j + 1]):
-                        continue
+                if self.IsSpecialToken(self.indices[i][j]) or self.IsSpecialToken(self.indices[i][j + 1]):
+                    continue
 
                 # 创建token对，只计算一次
                 token_pair = (self.indices[i][j], self.indices[i][j + 1])
