@@ -15,86 +15,86 @@ bpe = TokenizeBPE([train_set],
                   option_wrap_sentence=True,
                   option_preserve_tokens=True,
                   preserve_tokens=[".", "?", "!", ",", ":", ";"])
-# bpe.Process()
+bpe.ProcessMultiProcess(num_processes=4)
 
-# bpe.SaveToFile("token_list_wiki_2.txt")
-
-
-def ToOneHot(text: list[int]) -> torch.Tensor:
-    one_hot = torch.zeros(len(text), len(bpe.token_list))
-    for i, token in enumerate(text):
-        one_hot[i, token] = 1
-    return one_hot
+bpe.SaveToFile("token_list_wiki_2.txt")
 
 
-bpe.LoadFromFile("token_list_wiki.txt")
+# def ToOneHot(text: list[int]) -> torch.Tensor:
+#     one_hot = torch.zeros(len(text), len(bpe.token_list))
+#     for i, token in enumerate(text):
+#         one_hot[i, token] = 1
+#     return one_hot
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# bpe.LoadFromFile("token_list_wiki.txt")
 
-transformer = DecoderOnlyTransformer(bpe, device=device)
-transformer.to(device)
-loss_fn = nn.CrossEntropyLoss()
 
-optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.5, patience=3)
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-for epoch in range(10):
+# transformer = DecoderOnlyTransformer(bpe, device=device)
+# transformer.to(device)
+# loss_fn = nn.CrossEntropyLoss()
 
-    total_loss = 0
-    total_batch = 0
+# optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001)
+# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+#     optimizer, mode="min", factor=0.5, patience=3)
 
-    print(f"Epoch {epoch}")
-    print(f"Total data: {len(train_set)}")
+# for epoch in range(10):
 
-    data_index = 0
-    for i in range(1000):
+#     total_loss = 0
+#     total_batch = 0
 
-        sample_index = None
-        indices = None
-        while sample_index is None:
-            index = random.randint(0, len(train_set) - 1)
-            indices = bpe.Tokenize(train_set[index]["text"])
-            if len(indices) > 128:
-                sample_index = index
+#     print(f"Epoch {epoch}")
+#     print(f"Total data: {len(train_set)}")
 
-        data_index += 1
-        print(f"Data {data_index} / 1000")
+#     data_index = 0
+#     for i in range(1000):
 
-        if len(indices) < 256:
-            # use padding
-            indices = indices + [1] * (256 - len(indices))
+#         sample_index = None
+#         indices = None
+#         while sample_index is None:
+#             index = random.randint(0, len(train_set) - 1)
+#             indices = bpe.Tokenize(train_set[index]["text"])
+#             if len(indices) > 128:
+#                 sample_index = index
 
-        seq_len = 128
+#         data_index += 1
+#         print(f"Data {data_index} / 1000")
 
-        input_list = []
-        target_list = []
-        for index in range(len(indices) - seq_len):
-            input_slice = torch.tensor(indices[index:index + seq_len])
-            input_list.append(input_slice)
+#         if len(indices) < 256:
+#             # use padding
+#             indices = indices + [1] * (256 - len(indices))
 
-            target_slice = torch.tensor(indices[index + 1:index + seq_len + 1])
-            target_list.append(target_slice)
+#         seq_len = 128
 
-        for index in range(len(input_list) - 127):
-            input_batch = torch.stack(input_list[index:index + 128]).to(device)
-            target_batch = torch.stack(
-                target_list[index:index + 128]).to(device)
+#         input_list = []
+#         target_list = []
+#         for index in range(len(indices) - seq_len):
+#             input_slice = torch.tensor(indices[index:index + seq_len])
+#             input_list.append(input_slice)
 
-            output = transformer(input_batch)
+#             target_slice = torch.tensor(indices[index + 1:index + seq_len + 1])
+#             target_list.append(target_slice)
 
-            loss = loss_fn(output, target_batch)
-            total_loss += loss.item()
-            total_batch += 1
+#         for index in range(len(input_list) - 127):
+#             input_batch = torch.stack(input_list[index:index + 128]).to(device)
+#             target_batch = torch.stack(
+#                 target_list[index:index + 128]).to(device)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+#             output = transformer(input_batch)
 
-    print(total_loss / total_batch)
-    scheduler.step(total_loss / total_batch)
+#             loss = loss_fn(output, target_batch)
+#             total_loss += loss.item()
+#             total_batch += 1
 
-    print(f"Learning rate: {scheduler.get_last_lr()}")
+#             optimizer.zero_grad()
+#             loss.backward()
+#             optimizer.step()
 
-    torch.save(transformer.state_dict(), f"transformer.pt")
+#     print(total_loss / total_batch)
+#     scheduler.step(total_loss / total_batch)
+
+#     print(f"Learning rate: {scheduler.get_last_lr()}")
+
+#     torch.save(transformer.state_dict(), f"transformer.pt")

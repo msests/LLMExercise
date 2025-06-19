@@ -6,6 +6,10 @@ import re
 from collections import defaultdict
 import time
 from torch.utils.data import Dataset
+import multiprocessing as mp
+from multiprocessing import Pool, Manager
+import functools
+from typing import List, Dict, Tuple, Any
 
 
 class TokenizeBPE:
@@ -178,13 +182,17 @@ class TokenizeBPE:
             text += color + self.token_list[index] + reset
         return text
 
-    def Merge(self):
+    def Merge(self, use_multiprocess: bool = False, num_processes: int = None):
         length = self.LengthOfToken(self.most_freq_pair)
         print(f"Merge {self.most_freq_pair} with length {length}")
 
         self.token_list.append(self.most_freq_pair)
         self.vocab_size += 1
-        self.MergeIndices()
+
+        if use_multiprocess:
+            self.MergeIndicesMultiProcess(num_processes)
+        else:
+            self.MergeIndices()
 
     def MergeIndices(self):
         for i in range(len(self.indices)):
@@ -284,5 +292,236 @@ class TokenizeBPE:
             start_time = time.time()
             self.FindMaxOccurrence()
             self.Merge()
+            print(
+                f"Merge {self.vocab_size} tokens in {time.time() - start_time} seconds")
+
+    # 静态方法，用于多进程
+    @staticmethod
+    def _process_sample_chunk_static(chunk_data: Tuple[int, int, List[str], Dict[str, Any]]) -> Tuple[List[List[int]], Dict[str, int]]:
+        """处理样本块的静态方法，用于多进程"""
+        start_idx, end_idx, sample_texts, shared_config = chunk_data
+
+        local_alphabet_map = shared_config['alphabet_map'].copy()
+        local_token_list = shared_config['token_list'].copy()
+        local_vocab_size = shared_config['vocab_size']
+
+        local_indices = []
+
+        for i in range(start_idx, end_idx):
+            if i >= len(sample_texts):
+                break
+
+            text = sample_texts[i]
+            # 预处理文本
+            text = re.sub(r'\s+', ' ', text)
+            text = re.sub(r'(\s?[.,!?;:\'"])\s?', r'\1', text)
+            text = text.strip()
+
+            indices = []
+
+            # 添加句子开始标记（如果需要）
+            # 这里简化处理，实际使用时需要根据配置决定
+            # indices.append(0)  # START_INDEX
+
+            for char in text:
+                if char not in local_alphabet_map:
+                    local_alphabet_map[char] = local_vocab_size
+                    local_token_list.append(char)
+                    local_vocab_size += 1
+
+                # 简化句子标记处理
+                # if char in ['.', '!', '?', '\n', '。', '！', '？']:
+                #     indices.append(2)  # END_INDEX
+                #     indices.append(local_alphabet_map[char])
+                #     indices.append(0)  # START_INDEX
+                # else:
+                indices.append(local_alphabet_map[char])
+
+            # 移除末尾的START_INDEX
+            if indices and indices[-1] == 0:  # START_INDEX
+                indices.pop()
+
+            local_indices.append(indices)
+
+        return local_indices, local_alphabet_map
+
+    @staticmethod
+    def _find_occurrences_chunk_static(chunk_data: Tuple[List[List[int]], bool, List[int]]) -> Dict[Tuple[int, int], int]:
+        """计算频率统计的静态方法，用于多进程"""
+        indices_chunk, option_preserve_tokens, preserve_token_indices = chunk_data
+        local_occurrences = defaultdict(int)
+
+        for indices in indices_chunk:
+            length = len(indices)
+            for j in range(length - 1):
+                # 特殊字符将作为单独的token，不参与合并
+                if option_preserve_tokens:
+                    if (indices[j] in preserve_token_indices or
+                            indices[j + 1] in preserve_token_indices):
+                        continue
+
+                # 创建token对
+                token_pair = (indices[j], indices[j + 1])
+                local_occurrences[token_pair] += 1
+
+        return dict(local_occurrences)
+
+    @staticmethod
+    def _merge_indices_chunk_static(chunk_data: Tuple[List[List[int]], Tuple[int, int], int]) -> List[List[int]]:
+        """合并索引的静态方法，用于多进程"""
+        indices_chunk, most_freq_pair, new_token_id = chunk_data
+        merged_indices = []
+
+        for indices in indices_chunk:
+            new_indices = []
+            j = 0
+            while j < len(indices):
+                if (j < len(indices) - 1 and
+                    indices[j] == most_freq_pair[0] and
+                        indices[j + 1] == most_freq_pair[1]):
+                    # 合并这对token
+                    new_indices.append(new_token_id)
+                    j += 2  # 跳过下一个token，因为已经合并了
+                else:
+                    new_indices.append(indices[j])
+                    j += 1
+            merged_indices.append(new_indices)
+
+        return merged_indices
+
+    # 多进程相关方法
+    def CollectBasicTokensMultiProcess(self, num_processes: int = None):
+        """多进程版本的CollectBasicTokens"""
+        if num_processes is None:
+            num_processes = mp.cpu_count()
+
+        data_set = self.data_sets[0]
+        sample_total = data_set.num_rows - data_set.num_rows % self.sample_count
+        sample_range = sample_total // self.sample_count
+
+        # 准备样本文本
+        sample_texts = []
+        for i in range(self.sample_count):
+            lower = i * sample_range
+            sample_index = -1
+            while sample_index == -1 or data_set[sample_index]['text'] == '':
+                sample_index = lower + \
+                    math.floor(random.random() * sample_range)
+            sample_texts.append(data_set[sample_index]['text'])
+
+        # 准备共享配置
+        shared_config = {
+            'alphabet_map': self.alphabet_map.copy(),
+            'token_list': self.token_list.copy(),
+            'vocab_size': self.vocab_size
+        }
+
+        # 分块处理
+        chunk_size = max(1, self.sample_count // num_processes)
+        chunks = []
+
+        for i in range(0, self.sample_count, chunk_size):
+            end_idx = min(i + chunk_size, self.sample_count)
+            chunks.append((i, end_idx, sample_texts, shared_config))
+
+        # 多进程处理 - 使用静态方法
+        with Pool(processes=num_processes) as pool:
+            results = pool.map(
+                TokenizeBPE._process_sample_chunk_static, chunks)
+
+        # 合并结果
+        all_indices = []
+        merged_alphabet_map = {}
+        merged_token_list = []
+        max_vocab_size = self.vocab_size
+
+        for local_indices, local_alphabet_map in results:
+            all_indices.extend(local_indices)
+
+            # 合并字母表
+            for char, idx in local_alphabet_map.items():
+                if char not in merged_alphabet_map:
+                    merged_alphabet_map[char] = len(merged_alphabet_map)
+                    merged_token_list.append(char)
+                    max_vocab_size = max(
+                        max_vocab_size, merged_alphabet_map[char] + 1)
+
+        # 更新实例变量
+        self.indices = all_indices
+        self.alphabet_map = merged_alphabet_map
+        self.token_list = merged_token_list
+        self.vocab_size = max_vocab_size
+
+    def FindMaxOccurrenceMultiProcess(self, num_processes: int = None):
+        """多进程版本的FindMaxOccurrence"""
+        if num_processes is None:
+            num_processes = mp.cpu_count()
+
+        # 分块处理indices
+        chunk_size = max(1, len(self.indices) // num_processes)
+        chunks = []
+
+        for i in range(0, len(self.indices), chunk_size):
+            end_idx = min(i + chunk_size, len(self.indices))
+            indices_chunk = self.indices[i:end_idx]
+            chunks.append(
+                (indices_chunk, self.option_preserve_tokens, self.preserve_token_indices))
+
+        # 多进程处理 - 使用静态方法
+        with Pool(processes=num_processes) as pool:
+            results = pool.map(
+                TokenizeBPE._find_occurrences_chunk_static, chunks)
+
+        # 合并结果
+        self.occurrences.clear()
+        self.most_freq = 0
+        self.most_freq_pair = (0, 0)
+
+        for local_occurrences in results:
+            for token_pair, count in local_occurrences.items():
+                self.occurrences[token_pair] += count
+                if self.occurrences[token_pair] > self.most_freq:
+                    self.most_freq = self.occurrences[token_pair]
+                    self.most_freq_pair = token_pair
+
+    def MergeIndicesMultiProcess(self, num_processes: int = None):
+        """多进程版本的MergeIndices"""
+        if num_processes is None:
+            num_processes = mp.cpu_count()
+
+        # 分块处理indices
+        chunk_size = max(1, len(self.indices) // num_processes)
+        chunks = []
+
+        for i in range(0, len(self.indices), chunk_size):
+            end_idx = min(i + chunk_size, len(self.indices))
+            indices_chunk = self.indices[i:end_idx]
+            chunks.append(
+                (indices_chunk, self.most_freq_pair, self.vocab_size - 1))
+
+        # 多进程处理 - 使用静态方法
+        with Pool(processes=num_processes) as pool:
+            results = pool.map(TokenizeBPE._merge_indices_chunk_static, chunks)
+
+        # 合并结果
+        merged_indices = []
+        for chunk_result in results:
+            merged_indices.extend(chunk_result)
+
+        self.indices = merged_indices
+
+    def ProcessMultiProcess(self, num_processes: int = None):
+        """多进程版本的Process方法"""
+        if num_processes is None:
+            num_processes = mp.cpu_count()
+
+        print(f"使用 {num_processes} 个进程进行BPE训练")
+
+        self.CollectBasicTokensMultiProcess(num_processes)
+
+        while self.vocab_size < self.vocab_size_limit:
+            start_time = time.time()
+            self.FindMaxOccurrenceMultiProcess(num_processes)
+            self.Merge(use_multiprocess=True, num_processes=num_processes)
             print(
                 f"Merge {self.vocab_size} tokens in {time.time() - start_time} seconds")
