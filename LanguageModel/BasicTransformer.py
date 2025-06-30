@@ -102,7 +102,7 @@ class DecoderOnlyTransformer(nn.Module):
         self.device = device
 
         self.position_encoding = None
-        self.PreCalcPositionEncoding(batch_size=128)
+        self.PreCalcPositionEncoding(batch_size=1)
 
         self.embedding = nn.Embedding(
             num_embeddings=len(tokenize_bpe.token_list),

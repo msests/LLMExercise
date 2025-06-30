@@ -1,6 +1,7 @@
 import random
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import os
 import sys
@@ -9,15 +10,15 @@ from Tokenize.BPE import TokenizeBPE
 from Embedding.Word2Vec.CBOW import CBOW
 from LanguageModel.BasicTransformer import DecoderOnlyTransformer
 
-train_set, val_set, test_set = WikiTextDataset()
+# train_set, val_set, test_set = WikiTextDataset()
 
-bpe = TokenizeBPE([train_set],
+bpe = TokenizeBPE([],
                   option_wrap_sentence=True,
                   option_preserve_tokens=True,
                   preserve_tokens=[".", "?", "!", ",", ":", ";"])
-bpe.ProcessMultiProcess(num_processes=4)
+# bpe.ProcessMultiProcess(num_processes=4)
 
-bpe.SaveToFile("token_list_wiki_2.txt")
+# bpe.SaveToFile("token_list_wiki_2.txt")‘
 
 
 # def ToOneHot(text: list[int]) -> torch.Tensor:
@@ -27,12 +28,12 @@ bpe.SaveToFile("token_list_wiki_2.txt")
 #     return one_hot
 
 
-# bpe.LoadFromFile("token_list_wiki.txt")
+bpe.LoadFromFile("bpe_wiki_text_tokens.txt")
 
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# transformer = DecoderOnlyTransformer(bpe, device=device)
+transformer = DecoderOnlyTransformer(bpe, device=device)
 # transformer.to(device)
 # loss_fn = nn.CrossEntropyLoss()
 
@@ -98,3 +99,47 @@ bpe.SaveToFile("token_list_wiki_2.txt")
 #     print(f"Learning rate: {scheduler.get_last_lr()}")
 
 #     torch.save(transformer.state_dict(), f"transformer.pt")
+
+
+def loadWeights():
+    transformer.load_state_dict(torch.load("transformer.pt"))
+    transformer.to(device)
+
+
+loadWeights()
+
+
+def stringify(indices: list[int]) -> str:
+    return bpe.Stringify(indices)
+
+
+text = "Hello, how are you?"
+text_indices = bpe.Tokenize(text)
+
+for i in range(1000):
+    input_batch = None
+    if len(text_indices) >= 128:
+        input_batch = torch.tensor(text_indices[-128:]).to(device)
+    # pad to 128
+    else:
+        padding_size = 128 - len(text_indices)
+        input_batch = F.pad(torch.tensor(text_indices),
+                            (0, padding_size), value=1)
+        input_batch = input_batch.to(device)
+    input_batch = input_batch.unsqueeze(0)
+
+    output: torch.Tensor = transformer(input_batch)
+    output = output.transpose(1, 2)
+    new_indices = (output.argmax(dim=-1))
+
+    # 找到new_indices[0]中第一个值为1的索引
+    pad_positions = torch.where(new_indices[0] == 1)[0]
+    if len(pad_positions) > 0:
+        pad_index = pad_positions[0].item()
+        last_index = pad_index - 1
+    else:
+        last_index = -1
+
+    text_indices = text_indices + [new_indices[0][last_index].item()]
+
+    print(stringify(text_indices))
